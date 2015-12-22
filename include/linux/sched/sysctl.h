@@ -42,6 +42,7 @@ extern unsigned int sysctl_sched_child_runs_first;
 
 extern unsigned int sysctl_power_aware_timer_migration;
 extern unsigned int sysctl_early_detection_duration;
+extern unsigned int sysctl_sched_capacity_margin;
 
 #ifdef CONFIG_SCHED_QHMP
 extern unsigned int sysctl_sched_min_runtime;
