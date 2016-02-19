@@ -55,6 +55,9 @@ extern unsigned int sysctl_sched_new_task_windows;
 #endif
 #endif
 
+extern unsigned int sysctl_sched_is_big_little;
+extern unsigned int sysctl_sched_sync_hint_enable;
+
 enum sched_tunable_scaling {
 	SCHED_TUNABLESCALING_NONE,
 	SCHED_TUNABLESCALING_LOG,
