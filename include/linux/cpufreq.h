@@ -163,6 +163,7 @@ struct cpufreq_freqs {
 	u8 flags;		/* flags of cpufreq_driver, see below. */
 };
 
+bool cpufreq_driver_is_slow(void);
 
 /**
  * cpufreq_scale - "old * mult / div" calculation for large values (32-bit-arch safe)
@@ -289,6 +290,23 @@ struct cpufreq_driver {
 					 * frequency transitions */
 #define CPUFREQ_PM_NO_WARN	0x04	/* don't warn on suspend/resume speed
 					 * mismatches */
+
+/*
+ * Set by drivers which want cpufreq core to check if CPU is running at a
+ * frequency present in freq-table exposed by the driver. For these drivers if
+ * CPU is found running at an out of table freq, we will try to set it to a freq
+ * from the table. And if that fails, we will stop further boot process by
+ * issuing a BUG_ON().
+ */
+#define CPUFREQ_NEED_INITIAL_FREQ_CHECK	(1 << 5)
+
+/*
+ * Indicates that it is safe to call cpufreq_driver_target from
+ * non-interruptable context in scheduler hot paths.  Drivers must
+ * opt-in to this flag, as the safe default is that they might sleep
+ * or be too slow for hot path use.
+ */
+#define CPUFREQ_DRIVER_FAST		(1 << 6)
 
 int cpufreq_register_driver(struct cpufreq_driver *driver_data);
 int cpufreq_unregister_driver(struct cpufreq_driver *driver_data);
