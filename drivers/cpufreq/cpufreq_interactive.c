@@ -65,10 +65,10 @@ static spinlock_t speedchange_cpumask_lock;
 static struct mutex gov_lock;
 
 /* Target load.  Lower values result in higher CPU speeds. */
-#define DEFAULT_TARGET_LOAD 90
+#define DEFAULT_TARGET_LOAD 99
 static unsigned int default_target_loads[] = {DEFAULT_TARGET_LOAD};
 
-#define DEFAULT_TIMER_RATE (20 * USEC_PER_MSEC)
+#define DEFAULT_TIMER_RATE (25 * USEC_PER_MSEC)
 #define DEFAULT_ABOVE_HISPEED_DELAY DEFAULT_TIMER_RATE
 static unsigned int default_above_hispeed_delay[] = {
 	DEFAULT_ABOVE_HISPEED_DELAY };
@@ -83,7 +83,7 @@ struct cpufreq_interactive_tunables {
 	unsigned int freq_max;
 	/* The lower limit of the scaling-frequency; default to policy->min */
 	unsigned int freq_min;
-#define DEFAULT_DOWN_LOW_LOAD_THRESHOLD 6
+#define DEFAULT_DOWN_LOW_LOAD_THRESHOLD 5
 	/* The tunable variable for DOWN_LOW_LOAD_THRESHOLD */
 	unsigned int down_low_load_threshold;
 	/* Go to hi speed when CPU load at or above this value. */
@@ -97,7 +97,7 @@ struct cpufreq_interactive_tunables {
 	 * The minimum amount of time to spend at a frequency before we can ramp
 	 * down.
 	 */
-#define DEFAULT_MIN_SAMPLE_TIME (20 * USEC_PER_MSEC)
+#define DEFAULT_MIN_SAMPLE_TIME (25 * USEC_PER_MSEC)
 	unsigned long min_sample_time;
 	/*
 	 * The sample rate of the timer used to increase frequency
@@ -121,7 +121,7 @@ struct cpufreq_interactive_tunables {
 	 * Max additional time to wait in idle, beyond timer_rate, at speeds
 	 * above minimum before wakeup to reduce speed, or -1 if unnecessary.
 	 */
-#define DEFAULT_TIMER_SLACK (4 * DEFAULT_TIMER_RATE)
+#define DEFAULT_TIMER_SLACK (2 * DEFAULT_TIMER_RATE)
 	int timer_slack_val;
 	bool io_is_busy;
 	/* Improves frequency selection for more energy */
@@ -427,13 +427,19 @@ static void cpufreq_interactive_timer(unsigned long data)
 		} else {
 			new_freq = choose_freq(pcpu, loadadjfreq);
 		}
-	} else if (cpu_load <= tunables->down_low_load_threshold) {
-		new_freq = pcpu->policy->cpuinfo.min_freq;
 	} else {
 		new_freq = choose_freq(pcpu, loadadjfreq);
 		if (new_freq > tunables->hispeed_freq &&
 				pcpu->target_freq < tunables->hispeed_freq)
 			new_freq = tunables->hispeed_freq;
+	}
+
+	if (cpu_load <= tunables->down_low_load_threshold) {
+		if (cpu_load == 0) {
+			new_freq = pcpu->policy->min;
+		} else {
+			new_freq = (unsigned int)max((int)pcpu->policy->min, (int)new_freq - (108000 * ((int)tunables->down_low_load_threshold / cpu_load)));
+		}
 	}
 
 	if (pcpu->policy->cur >= tunables->hispeed_freq &&
