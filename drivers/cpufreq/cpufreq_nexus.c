@@ -26,6 +26,8 @@
 
 #include "cpufreq_governor.h"
 
+#define CPUGOV_NEXUS_DEBUG 0
+
 static struct cpufreq_nexus_tunables *global_tunables = NULL;
 static DEFINE_MUTEX(cpufreq_governor_nexus_mutex);
 
@@ -48,7 +50,7 @@ struct cpufreq_nexus_cpuinfo {
 
 struct cpufreq_nexus_tunables {
 	// load at which the cpugov decides to scale down
-	#define DEFAULT_DOWN_LOAD 80
+	#define DEFAULT_DOWN_LOAD 45
 	unsigned int down_load;
 
 	// delay in timer-ticks to scale down CPU
@@ -56,15 +58,15 @@ struct cpufreq_nexus_tunables {
 	unsigned int down_delay;
 
 	// frequency-steps if cpugov scales down
-	#define DEFAULT_DOWN_STEP 2
+	#define DEFAULT_DOWN_STEP 1
 	unsigned int down_step;
 
 	// load at which the cpugov decides to scale up
-	#define DEFAULT_UP_LOAD 90
+	#define DEFAULT_UP_LOAD 55
 	unsigned int up_load;
 
 	// delay in timer-ticks to scale up CPU
-	#define DEFAULT_UP_DELAY 2
+	#define DEFAULT_UP_DELAY 0
 	unsigned int up_delay;
 
 	// frequency-steps if cpugov scales up
@@ -146,8 +148,10 @@ static void cpufreq_nexus_timer(struct work_struct *work)
 	struct cpufreq_nexus_tunables *tunables;
 	int delay, real_delay, cpu, load;
 	unsigned int index = 0;
+	int signed_freq = 0;
 	unsigned int freq = 0,
-				 next_freq = 0;
+				 next_freq = 0,
+				 debug_freq = 0;
 	unsigned int ktime_now = ktime_to_us(ktime_get());
 	cputime64_t curr_idle, curr_wall, idle, wall;
 
@@ -181,33 +185,67 @@ static void cpufreq_nexus_timer(struct work_struct *work)
 		cpuinfo->init = 0;
 		goto requeue;
 	}
-	
+
 	// revalidate custom frequencies
+	// -----
+	// we don't have to care about concurrency as this isn't a
+	// life-devastating routine if it is executed twice on different cores
 	if (tunables->freq_min_do_revalidate) {
+		debug_freq = tunables->freq_min;
 		tunables->freq_min = choose_frequency(cpuinfo, &index, tunables->freq_min);
 		tunables->freq_min_do_revalidate = 0;
+
+#if CPUGOV_NEXUS_DEBUG
+		pr_info("%s: cpu%d: revalidated freq_min: %u -> %u\n", __func__, cpu, debug_freq, tunables->freq_min);
+#endif
 	}
 	if (tunables->freq_max_do_revalidate) {
+		debug_freq = tunables->freq_max;
 		tunables->freq_max = choose_frequency(cpuinfo, &index, tunables->freq_max);
 		tunables->freq_max_do_revalidate = 0;
+
+#if CPUGOV_NEXUS_DEBUG
+		pr_info("%s: cpu%d: revalidated freq_max: %u -> %u\n", __func__, cpu, debug_freq, tunables->freq_max);
+#endif
 	}
 	if (tunables->freq_boost_do_revalidate) {
+		debug_freq = tunables->freq_boost;
 		tunables->freq_boost = choose_frequency(cpuinfo, &index, tunables->freq_boost);
 		tunables->freq_boost_do_revalidate = 0;
+
+#if CPUGOV_NEXUS_DEBUG
+		pr_info("%s: cpu%d: revalidated freq_boost: %u -> %u\n", __func__, cpu, debug_freq, tunables->freq_boost);
+#endif
 	}
 
 	// calculate frequencies
+	pr_info("%s: cpu%d: init = %u\n", __func__, cpu, policy->cur);
 	freq = policy->cur;
 
 	if (wall >= idle) {
 		load = (wall > idle ? (100 * (wall - idle)) / wall : 0);
 
 		if (tunables->boost || ktime_now < tunables->boostpulse_end) {
+#if CPUGOV_NEXUS_DEBUG
+			pr_info("%s: cpu%d: boost = %u\n", __func__, cpu, tunables->freq_boost);
+#endif
 			freq = tunables->freq_boost;
 		} else {
 			if (load >= tunables->up_load) {
 				if (tunables->up_delay == 0 || cpuinfo->up_delay_counter >= tunables->up_delay) {
-					freq = min(policy->cur + (tunables->up_step * tunables->non_linear_frequency_scaler), policy->max);
+					signed_freq = (int)freq + ((int)tunables->up_step * (int)tunables->non_linear_frequency_scaler);
+#if CPUGOV_NEXUS_DEBUG
+					pr_info("%s: cpu%d: up-scaling       = %d\n", __func__, cpu, signed_freq);
+#endif
+
+					if (signed_freq > (int)policy->max)
+						signed_freq = (int)policy->max;
+
+					freq = (unsigned int)signed_freq;
+#if CPUGOV_NEXUS_DEBUG
+					pr_info("%s: cpu%d: up-scaling corr. = %u\n", __func__, cpu, freq);
+#endif
+
 					cpuinfo->up_delay_counter = 0;
 				} else if (tunables->up_delay > 0) {
 					cpuinfo->up_delay_counter++;
@@ -215,7 +253,19 @@ static void cpufreq_nexus_timer(struct work_struct *work)
 				cpuinfo->down_delay_counter = 0;
 			} else if (load <= tunables->down_load) {
 				if (tunables->down_delay == 0 || cpuinfo->down_delay_counter >= tunables->down_delay) {
-					freq = max(policy->cur - (tunables->down_step * tunables->non_linear_frequency_scaler), policy->min);
+					signed_freq = (int)freq - ((int)tunables->down_step * (int)tunables->non_linear_frequency_scaler);
+#if CPUGOV_NEXUS_DEBUG
+					pr_info("%s: cpu%d: down-scaling       = %d\n", __func__, cpu, signed_freq);
+#endif
+
+					if (signed_freq < (int)policy->min)
+						signed_freq = (int)policy->min;
+
+					freq = (unsigned int)signed_freq;
+#if CPUGOV_NEXUS_DEBUG
+					pr_info("%s: cpu%d: down-scaling corr. = %u\n", __func__, cpu, freq);
+#endif
+
 					cpuinfo->down_delay_counter = 0;
 				} else if (tunables->down_delay > 0) {
 					cpuinfo->down_delay_counter++;
@@ -227,15 +277,28 @@ static void cpufreq_nexus_timer(struct work_struct *work)
 			}
 
 			// apply tunables
-			if (next_freq < tunables->freq_min)
-				next_freq = max(policy->min, tunables->freq_min);
+			if (freq < tunables->freq_min) {
+				debug_freq = freq;
+				freq = max(policy->min, tunables->freq_min);
+#if CPUGOV_NEXUS_DEBUG
+				pr_info("%s: cpu%d: frequency %u is lower than allowed! scaling to %u\n", __func__, cpu, debug_freq, freq);
+#endif
+			}
 
-			if (next_freq > tunables->freq_max)
-				next_freq = min(policy->max, tunables->freq_max);
+			if (freq > tunables->freq_max){
+				debug_freq = freq;
+				freq = min(policy->max, tunables->freq_max);
+#if CPUGOV_NEXUS_DEBUG
+				pr_info("%s: cpu%d: frequency %u is higher than allowed! scaling to %u\n", __func__, cpu, debug_freq, freq);
+#endif
+			}
 		}
 
 		// choose frequency
 		next_freq = choose_frequency(cpuinfo, &index, freq);
+#if CPUGOV_NEXUS_DEBUG
+		pr_info("%s: cpu%d: === freq = %u ===\n", __func__, cpu, next_freq);
+#endif
 
 		if (next_freq != policy->cur) {
 			__cpufreq_driver_target(policy, next_freq, CPUFREQ_RELATION_C);
