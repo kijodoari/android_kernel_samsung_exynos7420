@@ -75,30 +75,43 @@ struct cpufreq_nexus_tunables {
 	#define DEFAULT_TIMER_RATE 20000
 	unsigned int timer_rate;
 
-	// used frequency-coefficient to support SoCs with a non-linear frequency-tables
-	#define DEFAULT_NON_LINEAR_FREQUENCY_SCALER 108000
-	int non_linear_frequency_scaler;
-
 	// indicates if I/O-time should be added to cputime
 	#define DEFAULT_IO_IS_BUSY 1
 	int io_is_busy;
 
 	// minimal frequency chosen by the cpugov
 	unsigned int freq_min;
+	int freq_min_do_revalidate;
 
 	// maximal frequency chosen by the cpugov
 	unsigned int freq_max;
+	int freq_max_do_revalidate;
+
+	// frequency used when governor is in boost-mode
+	unsigned int freq_boost;
+	int freq_boost_do_revalidate;
 
 	// simple boost to freq_max
 	#define DEFAULT_BOOST 0
 	int boost;
 
-	// determines if the power-efficient frequency-selection should be used
-	#define DEFAULT_POWER_EFFICIENT 0
-	int power_efficient;
-
 	// time in usecs when current boostpulse ends
 	u64 boostpulse;
+
+	// ktime when current boostpulse ends
+	u64 boostpulse_end;
+
+	// time in usecs when current boostpulse ends
+	#define DEFAULT_BOOSTPULSE_DURATION 50000
+	u64 boostpulse_duration;
+
+	// determines if the power-efficient frequency-selection should be used
+	#define DEFAULT_POWER_EFFICIENT 1
+	int power_efficient;
+
+	// used frequency-coefficient to support SoCs with a non-linear frequency-tables
+	#define DEFAULT_NON_LINEAR_FREQUENCY_SCALER 108000
+	int non_linear_frequency_scaler;
 };
 
 static DEFINE_PER_CPU(struct cpufreq_nexus_cpuinfo, gov_cpuinfo);
@@ -116,10 +129,10 @@ static unsigned int choose_frequency(struct cpufreq_nexus_cpuinfo *cpuinfo, int 
 			CPUFREQ_RELATION_C, index);
 	} else {
 		cpufreq_frequency_table_target(policy, cpuinfo->freq_table, base_freq,
-			CPUFREQ_RELATION_H, index);
+			CPUFREQ_RELATION_L, index);
 		if (cpuinfo->freq_table[*index].frequency != policy->cur) {
 			cpufreq_frequency_table_target(policy, cpuinfo->freq_table, base_freq,
-				CPUFREQ_RELATION_L, index);
+				CPUFREQ_RELATION_C, index);
 		}
 	}
 
@@ -168,6 +181,20 @@ static void cpufreq_nexus_timer(struct work_struct *work)
 		cpuinfo->init = 0;
 		goto requeue;
 	}
+	
+	// revalidate custom frequencies
+	if (tunables->freq_min_do_revalidate) {
+		tunables->freq_min = choose_frequency(cpuinfo, &index, tunables->freq_min);
+		tunables->freq_min_do_revalidate = 0;
+	}
+	if (tunables->freq_max_do_revalidate) {
+		tunables->freq_max = choose_frequency(cpuinfo, &index, tunables->freq_max);
+		tunables->freq_max_do_revalidate = 0;
+	}
+	if (tunables->freq_boost_do_revalidate) {
+		tunables->freq_boost = choose_frequency(cpuinfo, &index, tunables->freq_boost);
+		tunables->freq_boost_do_revalidate = 0;
+	}
 
 	// calculate frequencies
 	freq = policy->cur;
@@ -175,31 +202,37 @@ static void cpufreq_nexus_timer(struct work_struct *work)
 	if (wall >= idle) {
 		load = (wall > idle ? (100 * (wall - idle)) / wall : 0);
 
-		if (load >= tunables->up_load) {
-			if (tunables->up_delay == 0 || cpuinfo->up_delay_counter >= tunables->up_delay) {
-				freq = min(policy->cur + (tunables->up_step * tunables->non_linear_frequency_scaler), policy->max);
-				cpuinfo->up_delay_counter = 0;
-			} else if (tunables->up_delay > 0) {
-				cpuinfo->up_delay_counter++;
-			}
-		} else if (load <= tunables->down_load) {
-			if (tunables->down_delay == 0 || cpuinfo->down_delay_counter >= tunables->down_delay) {
-				freq = max(policy->cur - (tunables->down_step * tunables->non_linear_frequency_scaler), policy->min);
+		if (tunables->boost || ktime_now < tunables->boostpulse_end) {
+			freq = tunables->freq_boost;
+		} else {
+			if (load >= tunables->up_load) {
+				if (tunables->up_delay == 0 || cpuinfo->up_delay_counter >= tunables->up_delay) {
+					freq = min(policy->cur + (tunables->up_step * tunables->non_linear_frequency_scaler), policy->max);
+					cpuinfo->up_delay_counter = 0;
+				} else if (tunables->up_delay > 0) {
+					cpuinfo->up_delay_counter++;
+				}
 				cpuinfo->down_delay_counter = 0;
-			} else if (tunables->down_delay > 0) {
-				cpuinfo->down_delay_counter++;
+			} else if (load <= tunables->down_load) {
+				if (tunables->down_delay == 0 || cpuinfo->down_delay_counter >= tunables->down_delay) {
+					freq = max(policy->cur - (tunables->down_step * tunables->non_linear_frequency_scaler), policy->min);
+					cpuinfo->down_delay_counter = 0;
+				} else if (tunables->down_delay > 0) {
+					cpuinfo->down_delay_counter++;
+				}
+				cpuinfo->up_delay_counter = 0;
+			} else {
+				cpuinfo->up_delay_counter = 0;
+				cpuinfo->down_delay_counter = 0;
 			}
+
+			// apply tunables
+			if (next_freq < tunables->freq_min)
+				next_freq = max(policy->min, tunables->freq_min);
+
+			if (next_freq > tunables->freq_max)
+				next_freq = min(policy->max, tunables->freq_max);
 		}
-
-		// apply tunables
-		if (next_freq < tunables->freq_min)
-			next_freq = max(policy->min, tunables->freq_min);
-
-		if (next_freq > tunables->freq_max)
-			next_freq = min(policy->max, tunables->freq_max);
-
-		if (tunables->boost || ktime_now < tunables->boostpulse)
-			next_freq = min(policy->max, tunables->freq_max);
 
 		// choose frequency
 		next_freq = choose_frequency(cpuinfo, &index, freq);
@@ -224,7 +257,7 @@ exit:
 }
 
 #define gov_show_store(_name) \
-	gov_show(_name); \
+	gov_show(_name);          \
 	gov_store(_name)
 
 #define gov_sys_pol_show_store(_name)                                         \
@@ -237,14 +270,22 @@ exit:
 	static struct freq_attr _name##_gov_pol =                                 \
 		__ATTR(_name, 0666, show_##_name##_gov_pol, store_##_name##_gov_pol)
 
+#define gov_sys_pol_store(_name)                            \
+	gov_sys_store(_name);                                   \
+	gov_pol_store(_name);                                   \
+	static struct global_attr _name##_gov_sys =             \
+		__ATTR(_name, 0666, NULL, store_##_name##_gov_sys); \
+	static struct freq_attr _name##_gov_pol =               \
+		__ATTR(_name, 0666, NULL, store_##_name##_gov_pol)
+
 /*
  * Show-Macros
  */
-#define gov_show(_name)                              \
-static ssize_t show_##_name                          \
-(struct cpufreq_nexus_tunables *tunables, char *buf) \
-{                                                    \
-	return sprintf(buf, "%d\n", tunables->_name);    \
+#define gov_show(_name)                                                 \
+static ssize_t show_##_name                                             \
+(struct cpufreq_nexus_tunables *tunables, char *buf)                    \
+{                                                                       \
+	return sprintf(buf, "%llu\n", (unsigned long long)tunables->_name); \
 }
 
 #define gov_sys_show(_name)                               \
@@ -290,8 +331,55 @@ static ssize_t store_##_name##_gov_pol                                          
 	return store_##_name((struct cpufreq_nexus_tunables *)policy->governor_data, buf, count); \
 }
 
-static ssize_t show_boostpulse(struct cpufreq_nexus_tunables *tunables, char *buf) {
-	return sprintf(buf, "%d\n", ktime_to_us(ktime_get()) < tunables->boostpulse);
+static ssize_t show_freq_min(struct cpufreq_nexus_tunables *tunables, char *buf)
+{
+	return sprintf(buf, "%u\n", tunables->freq_min);
+}
+
+static ssize_t store_freq_min(struct cpufreq_nexus_tunables *tunables, const char *buf, size_t count)  {
+	unsigned long val = 0;
+	int ret = kstrtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+
+	tunables->freq_min = val;
+	tunables->freq_min_do_revalidate = 1;
+
+	return count;
+}
+
+static ssize_t show_freq_max(struct cpufreq_nexus_tunables *tunables, char *buf)
+{
+	return sprintf(buf, "%u\n", tunables->freq_max);
+}
+
+static ssize_t store_freq_max(struct cpufreq_nexus_tunables *tunables, const char *buf, size_t count)  {
+	unsigned long val = 0;
+	int ret = kstrtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+
+	tunables->freq_max = val;
+	tunables->freq_max_do_revalidate = 1;
+
+	return count;
+}
+
+static ssize_t show_freq_boost(struct cpufreq_nexus_tunables *tunables, char *buf)
+{
+	return sprintf(buf, "%u\n", tunables->freq_boost);
+}
+
+static ssize_t store_freq_boost(struct cpufreq_nexus_tunables *tunables, const char *buf, size_t count)  {
+	unsigned long val = 0;
+	int ret = kstrtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+
+	tunables->freq_boost = val;
+	tunables->freq_boost_do_revalidate = 1;
+
+	return count;
 }
 
 static ssize_t store_boostpulse(struct cpufreq_nexus_tunables *tunables, const char *buf, size_t count)  {
@@ -300,40 +388,39 @@ static ssize_t store_boostpulse(struct cpufreq_nexus_tunables *tunables, const c
 	if (ret < 0)
 		return ret;
 
-	tunables->boostpulse = ktime_to_us(ktime_get()) + val;
+	tunables->boostpulse_end = ktime_to_us(ktime_get()) + tunables->boostpulse_duration;
 	return count;
 }
 
-// mass-macros
 gov_show_store(down_load);
-gov_sys_pol_show_store(down_load);
 gov_show_store(down_delay);
-gov_sys_pol_show_store(down_delay);
 gov_show_store(down_step);
-gov_sys_pol_show_store(down_step);
 gov_show_store(up_load);
-gov_sys_pol_show_store(up_load);
 gov_show_store(up_delay);
-gov_sys_pol_show_store(up_delay);
 gov_show_store(up_step);
-gov_sys_pol_show_store(up_step);
 gov_show_store(timer_rate);
-gov_sys_pol_show_store(timer_rate);
 gov_show_store(io_is_busy);
-gov_sys_pol_show_store(io_is_busy);
-gov_show_store(freq_min);
-gov_sys_pol_show_store(freq_min);
-gov_show_store(freq_max);
-gov_sys_pol_show_store(freq_max);
 gov_show_store(boost);
-gov_sys_pol_show_store(boost);
+gov_show_store(boostpulse_duration);
 gov_show_store(power_efficient);
-gov_sys_pol_show_store(power_efficient);
 gov_show_store(non_linear_frequency_scaler);
-gov_sys_pol_show_store(non_linear_frequency_scaler);
 
-// custom
-gov_sys_pol_show_store(boostpulse);
+gov_sys_pol_show_store(down_load);
+gov_sys_pol_show_store(down_delay);
+gov_sys_pol_show_store(down_step);
+gov_sys_pol_show_store(up_load);
+gov_sys_pol_show_store(up_delay);
+gov_sys_pol_show_store(up_step);
+gov_sys_pol_show_store(timer_rate);
+gov_sys_pol_show_store(io_is_busy);
+gov_sys_pol_show_store(freq_min);
+gov_sys_pol_show_store(freq_max);
+gov_sys_pol_show_store(freq_boost);
+gov_sys_pol_show_store(boost);
+gov_sys_pol_store(boostpulse);
+gov_sys_pol_show_store(boostpulse_duration);
+gov_sys_pol_show_store(power_efficient);
+gov_sys_pol_show_store(non_linear_frequency_scaler);
 
 static struct attribute *attributes_gov_sys[] = {
 	&down_load_gov_sys.attr,
@@ -346,10 +433,11 @@ static struct attribute *attributes_gov_sys[] = {
 	&io_is_busy_gov_sys.attr,
 	&freq_min_gov_sys.attr,
 	&freq_max_gov_sys.attr,
+	&freq_boost_gov_sys.attr,
 	&boost_gov_sys.attr,
 	&boostpulse_gov_sys.attr,
+	&boostpulse_duration_gov_sys.attr,
 	&power_efficient_gov_sys.attr,
-	&boostpulse_gov_sys.attr,
 	&non_linear_frequency_scaler_gov_sys.attr,
 	NULL // NULL has to be terminating entry
 };
@@ -370,8 +458,10 @@ static struct attribute *attributes_gov_pol[] = {
 	&io_is_busy_gov_pol.attr,
 	&freq_min_gov_pol.attr,
 	&freq_max_gov_pol.attr,
+	&freq_boost_gov_pol.attr,
 	&boost_gov_pol.attr,
 	&boostpulse_gov_pol.attr,
+	&boostpulse_duration_gov_pol.attr,
 	&power_efficient_gov_pol.attr,
 	&non_linear_frequency_scaler_gov_pol.attr,
 	NULL // NULL has to be terminating entry
@@ -423,8 +513,10 @@ static int cpufreq_governor_nexus(struct cpufreq_policy *policy, unsigned int ev
 			tunables->io_is_busy = DEFAULT_IO_IS_BUSY;
 			tunables->freq_min = policy->min;
 			tunables->freq_max = policy->max;
+			tunables->freq_boost = policy->max;
 			tunables->boost = DEFAULT_BOOST;
 			tunables->boostpulse = 0;
+			tunables->boostpulse_duration = DEFAULT_BOOSTPULSE_DURATION;
 			tunables->power_efficient = DEFAULT_POWER_EFFICIENT;
 			tunables->non_linear_frequency_scaler = DEFAULT_NON_LINEAR_FREQUENCY_SCALER;
 
@@ -493,10 +585,14 @@ static int cpufreq_governor_nexus(struct cpufreq_policy *policy, unsigned int ev
 		case CPUFREQ_GOV_STOP:
 			pr_info("%s: received CPUFREQ_GOV_STOP for cpu%d\n", __func__, cpu);
 
-			cpuinfo = &per_cpu(gov_cpuinfo, cpu);
-			tunables = policy->governor_data;
+			for_each_cpu(work_cpu, policy->cpus) {
 
-			cancel_delayed_work_sync(&cpuinfo->work);
+				cpuinfo = &per_cpu(gov_cpuinfo, work_cpu);
+				tunables = policy->governor_data;
+
+				cancel_delayed_work_sync(&cpuinfo->work);
+
+			}
 
 			break;
 
