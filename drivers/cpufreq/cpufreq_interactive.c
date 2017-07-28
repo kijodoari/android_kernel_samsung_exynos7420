@@ -275,6 +275,8 @@ static unsigned int freq_to_targetload(
 static unsigned int choose_freq(struct cpufreq_interactive_cpuinfo *pcpu,
 		unsigned int loadadjfreq)
 {
+	struct cpufreq_interactive_tunables *tunables =
+		pcpu->policy->governor_data;
 	unsigned int freq = pcpu->policy->cur;
 	unsigned int prevfreq, freqmin, freqmax;
 	unsigned int tl;
@@ -294,7 +296,7 @@ static unsigned int choose_freq(struct cpufreq_interactive_cpuinfo *pcpu,
 
 		if (cpufreq_frequency_table_target(
 			    pcpu->policy, pcpu->freq_table, loadadjfreq / tl,
-			    CPUFREQ_RELATION_L, &index))
+			    (tunables->powersave_bias ? CPUFREQ_RELATION_C : CPUFREQ_RELATION_L), &index))
 			break;
 		freq = pcpu->freq_table[index].frequency;
 
@@ -309,7 +311,7 @@ static unsigned int choose_freq(struct cpufreq_interactive_cpuinfo *pcpu,
 				 */
 				if (cpufreq_frequency_table_target(
 					    pcpu->policy, pcpu->freq_table,
-					    freqmax - 1, CPUFREQ_RELATION_H,
+					    freqmax - 1, (tunables->powersave_bias ? CPUFREQ_RELATION_C : CPUFREQ_RELATION_H),
 					    &index))
 					break;
 				freq = pcpu->freq_table[index].frequency;
@@ -336,7 +338,7 @@ static unsigned int choose_freq(struct cpufreq_interactive_cpuinfo *pcpu,
 				 */
 				if (cpufreq_frequency_table_target(
 					    pcpu->policy, pcpu->freq_table,
-					    freqmin + 1, CPUFREQ_RELATION_L,
+					    freqmin + 1, (tunables->powersave_bias ? CPUFREQ_RELATION_C : CPUFREQ_RELATION_L),
 					    &index))
 					break;
 				freq = pcpu->freq_table[index].frequency;
@@ -468,23 +470,23 @@ static void cpufreq_interactive_timer(unsigned long data)
 	if (tunables->enforce_hispeed_freq_limit &&
 		new_freq > tunables->hispeed_freq)
 		new_freq = tunables->hispeed_freq;
-		
+
 	/*
 	 * Set an upper limit for the frequency. Used to replace
-	 * "scaling_max_freq" because the kernel does alter the value 
+	 * "scaling_max_freq" because the kernel does alter the value
 	 * somewhere the whole time so we can't probably set it.
 	 */
 	if (new_freq > tunables->freq_max)
 		new_freq = tunables->freq_max;
-		
+
 	/*
 	 * Set a lower limit for the frequency. Used to replace
-	 * "scaling_min_freq" because the kernel does alter the value 
+	 * "scaling_min_freq" because the kernel does alter the value
 	 * somewhere the whole time so we can't probably set it.
 	 */
 	if (new_freq < tunables->freq_min)
 		new_freq = tunables->freq_min;
-	 
+	
 	/*
 	 * Do not scale below floor_freq unless we have been at or above the
 	 * floor frequency for the minimum sample time since last validated.
@@ -1113,7 +1115,7 @@ static ssize_t store_boostpulse(struct cpufreq_interactive_tunables *tunables,
 	ret = kstrtoul(buf, 0, &val);
 	if (ret < 0)
 		return ret;
-	
+
 	if (val) {
 		tunables->boostpulse_endtime = ktime_to_us(ktime_get()) +
 			tunables->boostpulse_duration_val;
