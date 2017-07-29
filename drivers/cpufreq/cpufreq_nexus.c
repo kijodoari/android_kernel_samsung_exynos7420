@@ -52,7 +52,7 @@ struct cpufreq_nexus_cpuinfo {
 
 struct cpufreq_nexus_tunables {
 	// load at which the cpugov decides to scale down
-	#define DEFAULT_DOWN_LOAD 55
+	#define DEFAULT_DOWN_LOAD 40
 	unsigned int down_load;
 
 	// delay in timer-ticks to scale down CPU
@@ -64,7 +64,7 @@ struct cpufreq_nexus_tunables {
 	unsigned int down_step;
 
 	// load at which the cpugov decides to scale up
-	#define DEFAULT_UP_LOAD 65
+	#define DEFAULT_UP_LOAD 50
 	unsigned int up_load;
 
 	// delay in timer-ticks to scale up CPU
@@ -76,7 +76,7 @@ struct cpufreq_nexus_tunables {
 	unsigned int up_step;
 
 	// interval of the scaling-timer
-	#define DEFAULT_TIMER_RATE 20000
+	#define DEFAULT_TIMER_RATE 15000
 	unsigned int timer_rate;
 
 	// indicates if I/O-time should be added to cputime
