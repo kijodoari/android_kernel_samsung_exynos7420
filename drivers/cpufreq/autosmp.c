@@ -337,7 +337,7 @@ static int lcd_notifier_call(struct notifier_block *this,
 
 static int set_enabled(const char *val, const struct kernel_param *kp)
 {
-	int ret, cpu;
+	int ret;
 
 	ret = param_set_bool(val, kp);
 	if (enabled) {
@@ -454,7 +454,9 @@ static struct attribute_group asmp_stats_attr_group = {
 
 static int __init asmp_init(void)
 {
+#if DEBUG
 	unsigned int cpu;
+#endif
 	int rc;
 
 	asmp_param.max_cpus = nr_cpu_ids;

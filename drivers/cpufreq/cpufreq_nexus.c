@@ -61,7 +61,7 @@ struct cpufreq_nexus_cpuinfo {
 
 struct cpufreq_nexus_tunables {
 	// load at which the cpugov decides to scale down
-	#define DEFAULT_DOWN_LOAD 49
+	#define DEFAULT_DOWN_LOAD 40
 	unsigned int down_load;
 
 	// delay in timer-ticks to scale down CPU
@@ -73,7 +73,7 @@ struct cpufreq_nexus_tunables {
 	unsigned int down_step;
 
 	// load at which the cpugov decides to scale up
-	#define DEFAULT_UP_LOAD 51
+	#define DEFAULT_UP_LOAD 50
 	unsigned int up_load;
 
 	// delay in timer-ticks to scale up CPU
@@ -89,7 +89,7 @@ struct cpufreq_nexus_tunables {
 	unsigned int timer_rate;
 
 	// indicates if I/O-time should be added to cputime
-	#define DEFAULT_IO_IS_BUSY 0
+	#define DEFAULT_IO_IS_BUSY 1
 	int io_is_busy;
 
 	// minimal frequency chosen by the cpugov
@@ -135,15 +135,15 @@ struct cpufreq_nexus_tunables {
 	int hispeed_freq_do_revalidate;
 
 	// load which is used to determine if cpugov should exceed hispeed-frequency
-	#define DEFAULT_HISPEED_LOAD 90
+	#define DEFAULT_HISPEED_LOAD 100
 	unsigned int hispeed_load;
 
 	// delay in ticks after which th hispeed-exceeding is revalidated
-	#define DEFAULT_HISPEED_DELAY 2
+	#define DEFAULT_HISPEED_DELAY 1
 	unsigned int hispeed_delay;
 
 	// indicates if hispeed-revalidation should work as power-efficient as possible
-	#define DEFAULT_HISPEED_POWER_EFFICIENT 1
+	#define DEFAULT_HISPEED_POWER_EFFICIENT 0
 	unsigned int hispeed_power_efficient;
 };
 
