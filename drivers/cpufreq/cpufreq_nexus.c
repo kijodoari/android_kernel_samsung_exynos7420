@@ -31,6 +31,14 @@
 static struct cpufreq_nexus_tunables *global_tunables = NULL;
 static DEFINE_MUTEX(cpufreq_governor_nexus_mutex);
 
+#if CPUGOV_NEXUS_DEBUG
+#define nexus_debug(format, ...) \
+	pr_info(format, ##__VA_ARGS__)
+#else
+#define nexus_debug(format, ...) \
+	do { } while(0)
+#endif
+
 struct cpufreq_nexus_cpuinfo {
 	int init;
 
@@ -45,6 +53,7 @@ struct cpufreq_nexus_cpuinfo {
 
 	unsigned int down_delay_counter;
 	unsigned int up_delay_counter;
+	unsigned int hispeed_delay_counter;
 
 	struct delayed_work work;
 	struct mutex timer_mutex;
@@ -52,7 +61,7 @@ struct cpufreq_nexus_cpuinfo {
 
 struct cpufreq_nexus_tunables {
 	// load at which the cpugov decides to scale down
-	#define DEFAULT_DOWN_LOAD 40
+	#define DEFAULT_DOWN_LOAD 49
 	unsigned int down_load;
 
 	// delay in timer-ticks to scale down CPU
@@ -64,7 +73,7 @@ struct cpufreq_nexus_tunables {
 	unsigned int down_step;
 
 	// load at which the cpugov decides to scale up
-	#define DEFAULT_UP_LOAD 50
+	#define DEFAULT_UP_LOAD 51
 	unsigned int up_load;
 
 	// delay in timer-ticks to scale up CPU
@@ -80,7 +89,7 @@ struct cpufreq_nexus_tunables {
 	unsigned int timer_rate;
 
 	// indicates if I/O-time should be added to cputime
-	#define DEFAULT_IO_IS_BUSY 1
+	#define DEFAULT_IO_IS_BUSY 0
 	int io_is_busy;
 
 	// minimal frequency chosen by the cpugov
@@ -92,8 +101,8 @@ struct cpufreq_nexus_tunables {
 	int freq_max_do_revalidate;
 
 	// frequency used when governor is in boost-mode
-	unsigned int freq_boost;
-	int freq_boost_do_revalidate;
+	unsigned int boost_freq;
+	int boost_freq_do_revalidate;
 
 	// simple boost to freq_max
 	#define DEFAULT_BOOST 0
@@ -115,11 +124,27 @@ struct cpufreq_nexus_tunables {
 
 	// used frequency-coefficient to support SoCs with a non-linear frequency-tables
 	#define DEFAULT_FREQUENCY_STEP 108000
-	int frequency_step;
+	unsigned int frequency_step;
 
 	// time without ticks in microseconds after which the governor fully revalidates the cputime and resets the frequency
 	#define DEFAULT_RESET_STUCK_TIMESPAN DEFAULT_TIMER_RATE * 3
-	int reset_stuck_timespan;
+	unsigned int reset_stuck_timespan;
+
+	// hispeed-frequency which can only be exceeded after persting hispeed-load
+	unsigned int hispeed_freq;
+	int hispeed_freq_do_revalidate;
+
+	// load which is used to determine if cpugov should exceed hispeed-frequency
+	#define DEFAULT_HISPEED_LOAD 90
+	unsigned int hispeed_load;
+
+	// delay in ticks after which th hispeed-exceeding is revalidated
+	#define DEFAULT_HISPEED_DELAY 2
+	unsigned int hispeed_delay;
+
+	// indicates if hispeed-revalidation should work as power-efficient as possible
+	#define DEFAULT_HISPEED_POWER_EFFICIENT 1
+	unsigned int hispeed_power_efficient;
 };
 
 static DEFINE_PER_CPU(struct cpufreq_nexus_cpuinfo, gov_cpuinfo);
@@ -145,6 +170,7 @@ static unsigned int choose_frequency(struct cpufreq_nexus_cpuinfo *cpuinfo, int 
 
 static void cpufreq_nexus_timer(struct work_struct *work)
 {
+	unsigned int ktime_now = ktime_to_us(ktime_get());
 	struct cpufreq_nexus_cpuinfo *cpuinfo;
 	struct cpufreq_policy *policy;
 	struct cpufreq_nexus_tunables *tunables;
@@ -156,7 +182,6 @@ static void cpufreq_nexus_timer(struct work_struct *work)
 	unsigned int index = 0,
 	             freq = 0,
 	             freq_next = 0;
-	unsigned int ktime_now = ktime_to_us(ktime_get());
 	cputime64_t curr_idle, curr_wall, idle, wall;
 
 	int load_debug = 0;
@@ -201,64 +226,54 @@ static void cpufreq_nexus_timer(struct work_struct *work)
 		freq_debug = tunables->freq_min;
 		tunables->freq_min = choose_frequency(cpuinfo, &index, tunables->freq_min);
 		tunables->freq_min_do_revalidate = 0;
-
-#if CPUGOV_NEXUS_DEBUG
-		pr_info("%s: cpu%d: revalidated freq_min: %u -> %u\n", __func__, cpu, freq_debug, tunables->freq_min);
-#endif
+		nexus_debug("%s: cpu%d: revalidated freq_min: %u -> %u\n", __func__, cpu, freq_debug, tunables->freq_min);
 	}
 
 	if (tunables->freq_max_do_revalidate) {
 		freq_debug = tunables->freq_max;
 		tunables->freq_max = choose_frequency(cpuinfo, &index, tunables->freq_max);
 		tunables->freq_max_do_revalidate = 0;
-
-#if CPUGOV_NEXUS_DEBUG
-		pr_info("%s: cpu%d: revalidated freq_max: %u -> %u\n", __func__, cpu, freq_debug, tunables->freq_max);
-#endif
+		nexus_debug("%s: cpu%d: revalidated freq_max: %u -> %u\n", __func__, cpu, freq_debug, tunables->freq_max);
 	}
 
-	if (tunables->freq_boost_do_revalidate) {
-		freq_debug = tunables->freq_boost;
-		tunables->freq_boost = choose_frequency(cpuinfo, &index, tunables->freq_boost);
-		tunables->freq_boost_do_revalidate = 0;
+	if (tunables->boost_freq_do_revalidate) {
+		freq_debug = tunables->boost_freq;
+		tunables->boost_freq = choose_frequency(cpuinfo, &index, tunables->boost_freq);
+		tunables->boost_freq_do_revalidate = 0;
+		nexus_debug("%s: cpu%d: revalidated boost_freq: %u -> %u\n", __func__, cpu, freq_debug, tunables->boost_freq);
+	}
 
-#if CPUGOV_NEXUS_DEBUG
-		pr_info("%s: cpu%d: revalidated freq_boost: %u -> %u\n", __func__, cpu, freq_debug, tunables->freq_boost);
-#endif
+	if (tunables->hispeed_freq_do_revalidate && tunables->hispeed_freq != 0) {
+		freq_debug = tunables->hispeed_freq;
+		tunables->hispeed_freq = choose_frequency(cpuinfo, &index, tunables->hispeed_freq);
+		tunables->hispeed_freq_do_revalidate = 0;
+		nexus_debug("%s: cpu%d: revalidated hispeed_freq: %u -> %u\n", __func__, cpu, freq_debug, tunables->hispeed_freq);
 	}
 
 	// calculate frequencies
-#if CPUGOV_NEXUS_DEBUG
-	pr_info("%s: cpu%d: init = %u\n", __func__, cpu, policy->cur);
-#endif
+	nexus_debug("%s: cpu%d: init = %u\n", __func__, cpu, policy->cur);
 	freq = policy->cur;
 
 	if (wall >= idle) {
-		load = (wall > idle ? (100 * (wall - idle)) / wall : 0);
+		load = (100 * (wall - idle)) / wall;
 		load_debug = load;
 
 		if (tunables->boost || ktime_now < tunables->boostpulse_end) {
-#if CPUGOV_NEXUS_DEBUG
-			pr_info("%s: cpu%d: boost = %u\n", __func__, cpu, tunables->freq_boost);
-#endif
-			freq = tunables->freq_boost;
+			nexus_debug("%s: cpu%d: boost = %u\n", __func__, cpu, tunables->boost_freq);
+			freq = tunables->boost_freq;
 		} else {
 			if (load >= tunables->up_load) {
 				if (tunables->up_delay == 0 || cpuinfo->up_delay_counter >= tunables->up_delay) {
 					freq_signed = (int)freq + ((int)tunables->up_step * (int)tunables->frequency_step);
-#if CPUGOV_NEXUS_DEBUG
-					pr_info("%s: cpu%d: up-scaling       = %d\n", __func__, cpu, freq_signed);
-#endif
+					nexus_debug("%s: cpu%d: up-scaling       = %d\n", __func__, cpu, freq_signed);
 
 					if (freq_signed > (int)policy->max)
 						freq_signed = (int)policy->max;
 
 					freq = (unsigned int)freq_signed;
-#if CPUGOV_NEXUS_DEBUG
-					pr_info("%s: cpu%d: up-scaling corr. = %u\n", __func__, cpu, freq);
-#endif
-
 					cpuinfo->up_delay_counter = 0;
+
+					nexus_debug("%s: cpu%d: up-scaling corr. = %u\n", __func__, cpu, freq);
 				} else if (tunables->up_delay > 0) {
 					cpuinfo->up_delay_counter++;
 				}
@@ -266,19 +281,15 @@ static void cpufreq_nexus_timer(struct work_struct *work)
 			} else if (load <= tunables->down_load) {
 				if (tunables->down_delay == 0 || cpuinfo->down_delay_counter >= tunables->down_delay) {
 					freq_signed = (int)freq - ((int)tunables->down_step * (int)tunables->frequency_step);
-#if CPUGOV_NEXUS_DEBUG
-					pr_info("%s: cpu%d: down-scaling       = %d\n", __func__, cpu, freq_signed);
-#endif
+					nexus_debug("%s: cpu%d: down-scaling       = %d\n", __func__, cpu, freq_signed);
 
 					if (freq_signed < (int)policy->min)
 						freq_signed = (int)policy->min;
 
 					freq = (unsigned int)freq_signed;
-#if CPUGOV_NEXUS_DEBUG
-					pr_info("%s: cpu%d: down-scaling corr. = %u\n", __func__, cpu, freq);
-#endif
-
 					cpuinfo->down_delay_counter = 0;
+
+					nexus_debug("%s: cpu%d: down-scaling corr. = %u\n", __func__, cpu, freq);
 				} else if (tunables->down_delay > 0) {
 					cpuinfo->down_delay_counter++;
 				}
@@ -288,37 +299,48 @@ static void cpufreq_nexus_timer(struct work_struct *work)
 				cpuinfo->down_delay_counter = 0;
 			}
 
+			// dynamic hispeed frequency limiting
+			if (tunables->hispeed_freq > 0 && tunables->hispeed_delay > 0) {
+				if (cpuinfo->hispeed_delay_counter < tunables->hispeed_delay) {
+					freq_signed = (int)tunables->hispeed_freq;
+					if (freq_signed < (int)freq)
+						freq = (unsigned int)freq_signed;
+
+					if (load < tunables->hispeed_load && tunables->hispeed_power_efficient) {
+						cpuinfo->hispeed_delay_counter = 0;
+					} else {
+						cpuinfo->hispeed_delay_counter++;
+					}
+				} else {
+					if (load < tunables->hispeed_load) {
+						cpuinfo->hispeed_delay_counter = 0;
+					}
+				}
+			}
+
 			// apply tunables
 			if (freq < tunables->freq_min) {
 				freq_debug = freq;
 				freq = max(policy->min, tunables->freq_min);
-#if CPUGOV_NEXUS_DEBUG
-				pr_info("%s: cpu%d: frequency %u is lower than allowed! scaling to %u\n", __func__, cpu, freq_debug, freq);
-#endif
+				nexus_debug("%s: cpu%d: frequency %u is lower than allowed! scaling to %u\n", __func__, cpu, freq_debug, freq);
 			}
 
 			if (freq > tunables->freq_max){
 				freq_debug = freq;
 				freq = min(policy->max, tunables->freq_max);
-#if CPUGOV_NEXUS_DEBUG
-				pr_info("%s: cpu%d: frequency %u is higher than allowed! scaling to %u\n", __func__, cpu, freq_debug, freq);
-#endif
+				nexus_debug("%s: cpu%d: frequency %u is higher than allowed! scaling to %u\n", __func__, cpu, freq_debug, freq);
 			}
 		}
 
 		// check if the policy is very unresponsive and reset it if that's the case
 		if (cpuinfo->last_tick_time + tunables->reset_stuck_timespan <= ktime_now) {
 			freq = max(policy->min, tunables->freq_min);
-#if CPUGOV_NEXUS_DEBUG
-			pr_info("%s: cpu%d: resetting policy because of reaching reset_stuck_timespan\n", __func__, cpu);
-#endif
+			nexus_debug("%s: cpu%d: resetting policy because of reaching reset_stuck_timespan\n", __func__, cpu);
 		}
 
 		// choose frequency
 		freq_next = choose_frequency(cpuinfo, &index, freq);
-#if CPUGOV_NEXUS_DEBUG
-		pr_info("%s: cpu%d: === freq = %u ===\n", __func__, cpu, freq_next);
-#endif
+		nexus_debug("%s: cpu%d: === freq = %u ===\n", __func__, cpu, freq_next);
 
 		if (freq_next != policy->cur) {
 			__cpufreq_driver_target(policy, freq_next, CPUFREQ_RELATION_C);
@@ -449,19 +471,36 @@ static ssize_t store_freq_max(struct cpufreq_nexus_tunables *tunables, const cha
 	return count;
 }
 
-static ssize_t show_freq_boost(struct cpufreq_nexus_tunables *tunables, char *buf)
+static ssize_t show_boost_freq(struct cpufreq_nexus_tunables *tunables, char *buf)
 {
-	return sprintf(buf, "%u\n", tunables->freq_boost);
+	return sprintf(buf, "%u\n", tunables->boost_freq);
 }
 
-static ssize_t store_freq_boost(struct cpufreq_nexus_tunables *tunables, const char *buf, size_t count)  {
+static ssize_t store_boost_freq(struct cpufreq_nexus_tunables *tunables, const char *buf, size_t count)  {
 	unsigned long val = 0;
 	int ret = kstrtoul(buf, 0, &val);
 	if (ret < 0)
 		return ret;
 
-	tunables->freq_boost = val;
-	tunables->freq_boost_do_revalidate = 1;
+	tunables->boost_freq = val;
+	tunables->boost_freq_do_revalidate = 1;
+
+	return count;
+}
+
+static ssize_t show_hispeed_freq(struct cpufreq_nexus_tunables *tunables, char *buf)
+{
+	return sprintf(buf, "%u\n", tunables->hispeed_freq);
+}
+
+static ssize_t store_hispeed_freq(struct cpufreq_nexus_tunables *tunables, const char *buf, size_t count)  {
+	unsigned long val = 0;
+	int ret = kstrtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+
+	tunables->hispeed_freq = val;
+	tunables->hispeed_freq_do_revalidate = 1;
 
 	return count;
 }
@@ -489,6 +528,9 @@ gov_show_store(boostpulse_duration);
 gov_show_store(power_efficient);
 gov_show_store(frequency_step);
 gov_show_store(reset_stuck_timespan);
+gov_show_store(hispeed_load);
+gov_show_store(hispeed_delay);
+gov_show_store(hispeed_power_efficient);
 
 gov_sys_pol_show_store(down_load);
 gov_sys_pol_show_store(down_delay);
@@ -500,13 +542,17 @@ gov_sys_pol_show_store(timer_rate);
 gov_sys_pol_show_store(io_is_busy);
 gov_sys_pol_show_store(freq_min);
 gov_sys_pol_show_store(freq_max);
-gov_sys_pol_show_store(freq_boost);
+gov_sys_pol_show_store(boost_freq);
 gov_sys_pol_show_store(boost);
 gov_sys_pol_store(boostpulse);
 gov_sys_pol_show_store(boostpulse_duration);
 gov_sys_pol_show_store(power_efficient);
 gov_sys_pol_show_store(frequency_step);
 gov_sys_pol_show_store(reset_stuck_timespan);
+gov_sys_pol_show_store(hispeed_freq);
+gov_sys_pol_show_store(hispeed_load);
+gov_sys_pol_show_store(hispeed_delay);
+gov_sys_pol_show_store(hispeed_power_efficient);
 
 static struct attribute *attributes_gov_sys[] = {
 	&down_load_gov_sys.attr,
@@ -519,13 +565,17 @@ static struct attribute *attributes_gov_sys[] = {
 	&io_is_busy_gov_sys.attr,
 	&freq_min_gov_sys.attr,
 	&freq_max_gov_sys.attr,
-	&freq_boost_gov_sys.attr,
+	&boost_freq_gov_sys.attr,
 	&boost_gov_sys.attr,
 	&boostpulse_gov_sys.attr,
 	&boostpulse_duration_gov_sys.attr,
 	&power_efficient_gov_sys.attr,
 	&frequency_step_gov_sys.attr,
 	&reset_stuck_timespan_gov_sys.attr,
+	&hispeed_freq_gov_sys.attr,
+	&hispeed_load_gov_sys.attr,
+	&hispeed_delay_gov_sys.attr,
+	&hispeed_power_efficient_gov_sys.attr,
 	NULL // NULL has to be terminating entry
 };
 
@@ -545,13 +595,17 @@ static struct attribute *attributes_gov_pol[] = {
 	&io_is_busy_gov_pol.attr,
 	&freq_min_gov_pol.attr,
 	&freq_max_gov_pol.attr,
-	&freq_boost_gov_pol.attr,
+	&boost_freq_gov_pol.attr,
 	&boost_gov_pol.attr,
 	&boostpulse_gov_pol.attr,
 	&boostpulse_duration_gov_pol.attr,
 	&power_efficient_gov_pol.attr,
 	&frequency_step_gov_pol.attr,
 	&reset_stuck_timespan_gov_pol.attr,
+	&hispeed_freq_gov_pol.attr,
+	&hispeed_load_gov_pol.attr,
+	&hispeed_delay_gov_pol.attr,
+	&hispeed_power_efficient_gov_pol.attr,
 	NULL // NULL has to be terminating entry
 };
 
@@ -577,7 +631,7 @@ static int cpufreq_governor_nexus(struct cpufreq_policy *policy, unsigned int ev
 
 	switch (event) {
 		case CPUFREQ_GOV_POLICY_INIT:
-			pr_info("%s: received CPUFREQ_GOV_POLICY_INIT for cpu%d\n", __func__, cpu);
+			nexus_debug("%s: received CPUFREQ_GOV_POLICY_INIT for cpu%d\n", __func__, cpu);
 			mutex_lock(&cpufreq_governor_nexus_mutex);
 
 			if (!have_governor_per_policy()) {
@@ -601,13 +655,17 @@ static int cpufreq_governor_nexus(struct cpufreq_policy *policy, unsigned int ev
 			tunables->io_is_busy = DEFAULT_IO_IS_BUSY;
 			tunables->freq_min = policy->min;
 			tunables->freq_max = policy->max;
-			tunables->freq_boost = policy->max;
+			tunables->boost_freq = policy->max;
 			tunables->boost = DEFAULT_BOOST;
 			tunables->boostpulse = 0;
 			tunables->boostpulse_duration = DEFAULT_BOOSTPULSE_DURATION;
 			tunables->power_efficient = DEFAULT_POWER_EFFICIENT;
 			tunables->frequency_step = DEFAULT_FREQUENCY_STEP;
 			tunables->reset_stuck_timespan = DEFAULT_RESET_STUCK_TIMESPAN;
+			tunables->hispeed_freq = policy->max;
+			tunables->hispeed_load = DEFAULT_HISPEED_LOAD;
+			tunables->hispeed_delay = DEFAULT_HISPEED_DELAY;
+			tunables->hispeed_power_efficient = DEFAULT_HISPEED_POWER_EFFICIENT;
 
 			rc = sysfs_create_group(get_governor_parent_kobj(policy), get_attribute_group());
 			if (rc) {
@@ -624,7 +682,7 @@ static int cpufreq_governor_nexus(struct cpufreq_policy *policy, unsigned int ev
 			break;
 
 		case CPUFREQ_GOV_POLICY_EXIT:
-			pr_info("%s: received CPUFREQ_GOV_POLICY_EXIT for cpu%d\n", __func__, cpu);
+			nexus_debug("%s: received CPUFREQ_GOV_POLICY_EXIT for cpu%d\n", __func__, cpu);
 			cpuinfo = &per_cpu(gov_cpuinfo, cpu);
 			tunables = policy->governor_data;
 
@@ -639,7 +697,7 @@ static int cpufreq_governor_nexus(struct cpufreq_policy *policy, unsigned int ev
 			break;
 
 		case CPUFREQ_GOV_START:
-			pr_info("%s: received CPUFREQ_GOV_START for cpu%d\n", __func__, cpu);
+			nexus_debug("%s: received CPUFREQ_GOV_START for cpu%d\n", __func__, cpu);
 			if (!cpu_online(cpu) || !policy->cur)
 				return -EINVAL;
 
@@ -672,7 +730,7 @@ static int cpufreq_governor_nexus(struct cpufreq_policy *policy, unsigned int ev
 			break;
 
 		case CPUFREQ_GOV_STOP:
-			pr_info("%s: received CPUFREQ_GOV_STOP for cpu%d\n", __func__, cpu);
+			nexus_debug("%s: received CPUFREQ_GOV_STOP for cpu%d\n", __func__, cpu);
 
 			for_each_cpu(work_cpu, policy->cpus) {
 
@@ -686,7 +744,7 @@ static int cpufreq_governor_nexus(struct cpufreq_policy *policy, unsigned int ev
 			break;
 
 		case CPUFREQ_GOV_LIMITS:
-			pr_info("%s: received CPUFREQ_GOV_LIMITS for cpu%d\n", __func__, cpu);
+			nexus_debug("%s: received CPUFREQ_GOV_LIMITS for cpu%d\n", __func__, cpu);
 			mutex_lock(&cpufreq_governor_nexus_mutex);
 
 			cpuinfo = &per_cpu(gov_cpuinfo, cpu);
