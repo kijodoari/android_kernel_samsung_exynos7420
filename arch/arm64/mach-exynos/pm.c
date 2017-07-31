@@ -277,16 +277,19 @@ static struct sfr_save save_rcg[] = {
 
 static int check_powerstate_nonbootcpus(void)
 {
+	int ret = false;
+
+#ifdef CONFIG_SCHED_HMP
 	extern struct exynos_cpu_power_ops exynos_cpu;
 	extern struct cpumask hmp_slow_cpu_mask;
 	int cpu;
-	int ret = false;
 
 	for_each_cpu_and(cpu, cpu_possible_mask, &hmp_slow_cpu_mask) {
 		if (cpu == 0)
 			continue;
 		ret |= exynos_cpu.power_state(cpu);
 	}
+#endif
 
 	return ret;
 }

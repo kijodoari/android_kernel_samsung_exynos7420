@@ -791,4 +791,7 @@ static int __init register_cpufreq_notifier(void)
 		return ret;
 
 	return cpufreq_register_notifier(&cpufreq_policy_notifier,
-						CPUFREQ_
+						CPUFREQ_POLICY_NOTIFIER);
+}
+core_initcall(register_cpufreq_notifier);
+#endif
