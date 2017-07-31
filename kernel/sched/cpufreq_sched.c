@@ -478,7 +478,7 @@ static ssize_t store_##file_name##_gov_pol				\
 
 #define gov_pol_attr_rw(_name)						\
 	static struct freq_attr _name##_gov_pol =				\
-	__ATTR(_name, 0644, show_##_name##_gov_pol, store_##_name##_gov_pol)
+	__ATTR(_name, 0666, show_##_name##_gov_pol, store_##_name##_gov_pol)
 
 #define show_store_gov_pol_sys(file_name)				\
 	show_gov_pol_sys(file_name);						\
