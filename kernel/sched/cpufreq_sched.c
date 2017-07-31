@@ -37,6 +37,8 @@ static DEFINE_PER_CPU(int, governor_started);
 struct gov_data {
 	ktime_t throttle;
 	unsigned int throttle_nsec;
+	unsigned int freq_min;
+	unsigned int freq_max;
 	struct cpufreq_policy *policy;
 	unsigned int freq;
 	bool change_pending;
@@ -194,6 +196,14 @@ void cpufreq_sched_set_cap(int cpu, unsigned long capacity)
 	/* Convert the new maximum capacity request into a cpu frequency */
 	freq_new = (capacity * gd->max) / capacity_orig_of(cpu);
 
+	// user limitation checks
+	if (freq_new > gd->freq_max)
+		freq_new = gd->freq_max;
+
+	if (freq_new < gd->freq_min)
+		freq_new = gd->freq_min;
+
+	// final limitation checks
 	if (freq_new > policy->max)
 		freq_new = policy->max;
 
@@ -411,6 +421,42 @@ static ssize_t store_throttle_ns(struct gov_data *gd,
 	gd->throttle_nsec = val;
 	return count;
 }
+
+static ssize_t show_freq_min(struct gov_data *gd, char *buf)
+{
+	return sprintf(buf, "%u\n", gd->freq_min);
+}
+
+static ssize_t store_freq_min(struct gov_data *gd,
+		const char *buf, size_t count)
+{
+	int ret;
+	long unsigned int val;
+
+	ret = kstrtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+	gd->freq_min = val;
+	return count;
+}
+
+static ssize_t show_freq_max(struct gov_data *gd, char *buf)
+{
+	return sprintf(buf, "%u\n", gd->freq_max);
+}
+
+static ssize_t store_freq_max(struct gov_data *gd,
+		const char *buf, size_t count)
+{
+	int ret;
+	long unsigned int val;
+
+	ret = kstrtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+	gd->freq_max = val;
+	return count;
+}
 /*
  * Create show/store routines
  * - sys: One governor instance for complete SYSTEM
@@ -443,10 +489,14 @@ static ssize_t store_##file_name##_gov_pol				\
 	gov_pol_attr_rw(file_name)
 
 tunable_handlers(throttle_ns);
+tunable_handlers(freq_min);
+tunable_handlers(freq_max);
 
 /* Per policy governor instance */
 static struct attribute *sched_attributes_gov_pol[] = {
 	&throttle_ns_gov_pol.attr,
+	&freq_min_gov_pol.attr,
+	&freq_max_gov_pol.attr,
 	NULL,
 };
 
