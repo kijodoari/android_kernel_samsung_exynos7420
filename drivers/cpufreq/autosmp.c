@@ -74,7 +74,7 @@ static struct asmp_param_struct {
 };
 
 static unsigned int cycle = 0;
-static int enabled __read_mostly = 1;
+static int enabled __read_mostly = 0;
 
 static unsigned int num_online_cluster_cpus(int cluster)
 {
