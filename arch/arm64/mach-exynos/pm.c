@@ -279,7 +279,6 @@ static int check_powerstate_nonbootcpus(void)
 {
 	int ret = false;
 
-#ifdef CONFIG_SCHED_HMP
 	extern struct exynos_cpu_power_ops exynos_cpu;
 	extern struct cpumask hmp_slow_cpu_mask;
 	int cpu;
@@ -289,7 +288,6 @@ static int check_powerstate_nonbootcpus(void)
 			continue;
 		ret |= exynos_cpu.power_state(cpu);
 	}
-#endif
 
 	return ret;
 }
